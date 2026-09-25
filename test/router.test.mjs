@@ -105,6 +105,10 @@ test('recognizes fresh turn and tool continuation', () => {
   const continuation = requestInfo({ input: [{ type: 'additional_tools' }, { type: 'function_call_output', output: 'ok' }] }, { 'thread-id': 't1' });
   assert.equal(continuation.continuation, true);
   assert.equal(continuation.fresh, false);
+  const historicalTool = requestInfo({ input: [{ type: 'additional_tools' }, { type: 'function_call_output', output: 'old result' },
+    { role: 'user', content: 'Use Astra high' }] }, { 'thread-id': 't1' });
+  assert.equal(historicalTool.fresh, true);
+  assert.equal(historicalTool.continuation, false);
 });
 
 test('explicit Turkish and English route requests outrank JEV', () => {
@@ -118,6 +122,7 @@ test('explicit Turkish and English route requests outrank JEV', () => {
   assert.equal(parseManualPreference('Bu turda Astra ile derinden incele')?.model, 'astra');
   assert.deepEqual(parseManualPreference('Bu turda Astra’yı kullan; projeyi derinden incele.'), { model: 'astra', effort: null });
   assert.deepEqual(parseManualPreference('Bu turda Sol high kullan.'), { model: 'sol', effort: 'high' });
+  assert.deepEqual(parseManualPreference('astra meselesini çözdüysen bir de astrayla dener misin peki?'), { model: 'astra', effort: null });
   assert.equal(parseManualPreference('Astra’yı kullanma.'), null);
 });
 
@@ -149,6 +154,10 @@ test('one-turn model request fixes Astra while JEV chooses effort from the task 
   assert.equal(forwarded.model, 'gpt-6-astra');
   assert.equal(forwarded.reasoning.effort, 'xhigh');
   assert.equal(asked.length, 1);
+  forwarded = await send({ ...turn, input: [{ type: 'additional_tools' }, { role: 'user', content: 'astra meselesini çözdüysen bir de astrayla dener misin peki?' }] });
+  assert.equal(forwarded.model, 'gpt-6-astra');
+  assert.equal(forwarded.reasoning.effort, 'low');
+  assert.equal(asked.length, 2);
   await f.store.setControl({ override: null });
   forwarded = await send({ ...turn, input: [{ type: 'additional_tools' }, { role: 'user', content: 'README içindeki yazım hatasını düzelt.' }] });
   assert.equal(forwarded.model, 'gpt-6-luna');
@@ -362,6 +371,42 @@ test('older CLI model listing cannot replace the Desktop routing catalog', async
   const forwarded = f.calls.filter(call => call.url.endsWith('/responses')).map(call => JSON.parse(call.options.body.toString()).model);
   assert.deepEqual(forwarded, ['gpt-6-luna', 'gpt-6-luna']);
   assert.equal(f.calls.filter(call => new URL(call.url).searchParams.get('client_version') === '0.155.0').length, 1);
+});
+
+test('API key model listing goes to the OpenAI API endpoint', async t => {
+  const f = await fixture(t);
+  const response = await fetch(`${f.base}/models`, { headers: { ...f.localHeaders, authorization: 'Bearer synthetic-api-key' } });
+  assert.equal(response.status, 200);
+  assert.match(f.calls.at(-1).url, /^https:\/\/api\.openai\.com\/v1\/models/);
+  assert.equal(f.calls.at(-1).options.headers.authorization, 'Bearer synthetic-api-key');
+});
+
+test('historical tool output does not override a new one-turn model request', async t => {
+  const f = await fixture(t);
+  const headers = { ...f.localHeaders, 'chatgpt-account-id': 'account', 'thread-id': 'full-history', 'content-type': 'application/json' };
+  const first = await fetch(`${f.base}/responses`, { method: 'POST', headers, body: JSON.stringify(turn) });
+  assert.equal(first.status, 200); await first.text();
+  const next = { model: 'jev-auto', input: [...turn.input, { type: 'function_call_output', call_id: 'old', output: 'test passed' },
+    { role: 'assistant', content: 'done' }, { role: 'user', content: 'Use Astra high' }] };
+  const response = await fetch(`${f.base}/responses`, { method: 'POST', headers, body: JSON.stringify(next) });
+  assert.equal(response.status, 200); await response.text();
+  const forwarded = JSON.parse(f.calls.filter(item => item.url.endsWith('/responses')).at(-1).options.body.toString());
+  assert.equal(forwarded.model, 'gpt-6-astra');
+  assert.equal(forwarded.reasoning.effort, 'high');
+});
+
+test('persistent override survives failure reassessment', async t => {
+  const f = await fixture(t);
+  const headers = { ...f.localHeaders, 'chatgpt-account-id': 'account', 'thread-id': 'override-failure', 'content-type': 'application/json' };
+  await f.store.setControl({ override: { model: 'gpt-6-sol', effort: 'high' } });
+  await fetch(`${f.base}/responses`, { method: 'POST', headers, body: JSON.stringify(turn) });
+  const failure = { model: 'jev-auto', input: [{ type: 'function_call_output', call_id: 'failure', output: 'FAIL test: AssertionError' }] };
+  const response = await fetch(`${f.base}/responses`, { method: 'POST', headers, body: JSON.stringify(failure) });
+  assert.equal(response.status, 200); await response.text();
+  const forwarded = JSON.parse(f.calls.filter(item => item.url.endsWith('/responses')).at(-1).options.body.toString());
+  assert.equal(forwarded.model, 'gpt-6-sol');
+  assert.equal(forwarded.reasoning.effort, 'high');
+  assert.equal(f.store.lastDecision.source, 'manual_override_reassess');
 });
 
 test('active route chooses exact pair and preserves canonical input and SSE', async t => {

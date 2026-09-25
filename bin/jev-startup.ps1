@@ -16,6 +16,7 @@ finally { $hasher.Dispose() }
 $runtimeDirectory = Join-Path $projectRoot '.runtime'
 $supervisorExe = Join-Path $runtimeDirectory ('jev-supervisor-' + $sourceHash + '.exe')
 $expectedArgument = '"' + $nodeExe + '" "' + $entry + '" "' + $dataDirectory + '"'
+$ownedArgumentPattern = '^"[^"]+" "' + [regex]::Escape($entry) + '" "[^"]+"$'
 $legacyArgument = '"' + $entry + '" serve'
 $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 $owned = $false
@@ -27,7 +28,7 @@ if ($task) {
   $supervisorOwned = @($task.Actions).Count -eq 1 -and
     (Split-Path -Parent $task.Actions[0].Execute) -eq $runtimeDirectory -and
     (Split-Path -Leaf $task.Actions[0].Execute) -match '^jev-supervisor-[a-f0-9]{16}\.exe$' -and
-    $task.Actions[0].Arguments -eq $expectedArgument
+    $task.Actions[0].Arguments -match $ownedArgumentPattern
   $owned = $legacyOwned -or $supervisorOwned
   $compliant = $supervisorOwned -and $task.Actions[0].Execute -eq $supervisorExe -and
     $task.Settings.StartWhenAvailable -and $task.Settings.RestartCount -ge 3 -and @($task.Triggers).Count -eq 2

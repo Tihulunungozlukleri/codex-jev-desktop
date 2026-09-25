@@ -4,6 +4,13 @@ import { join } from 'node:path';
 import { secureWrite } from './secrets.mjs';
 
 const digest = text => createHash('sha256').update(text).digest('hex');
+async function atomicReplace(path, value) {
+  const temp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    await writeFile(temp, value, { mode: 0o600, flag: 'wx' });
+    await rename(temp, path);
+  } finally { await rm(temp, { force: true }); }
+}
 const ROOT_START = '# BEGIN JEV-DESKTOP ROOT';
 const ROOT_END = '# END JEV-DESKTOP ROOT';
 const EXT_START = '# BEGIN JEV-DESKTOP EXTENSION';
@@ -62,15 +69,26 @@ export async function install({ configPath, dataDir, port, hookPath, preview = t
   try { const manifest = JSON.parse(await readFile(manifestPath, 'utf8')); if (!manifest.uninstalledAt) throw new Error('Already installed; uninstall first'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   await secureWrite(dataDir, 'capability-token', token);
-  const backupPath = join(dataDir, `config-before-jev-${Date.now()}.toml`);
-  await writeFile(backupPath, original, { flag: 'wx', mode: 0o600 });
-  const current = await readFile(configPath, 'utf8');
-  if (digest(current) !== digest(original)) throw new Error('Codex config changed during installation');
-  const temp = `${configPath}.jev-desktop.tmp`;
-  await writeFile(temp, plan.text, { mode: 0o600, flag: 'wx' });
-  await rename(temp, configPath);
-  await writeFile(manifestPath, JSON.stringify({ configPath, backupPath, originalHash: digest(original), installedHash: digest(plan.text), previous: plan.previous }, null, 2), { mode: 0o600 });
-  return { configPath, backupPath, installed: true };
+  const backupPath = join(dataDir, `config-before-jev-${Date.now()}-${randomBytes(4).toString('hex')}.toml`);
+  let manifestPrepared = false;
+  try {
+    await writeFile(backupPath, original, { flag: 'wx', mode: 0o600 });
+    const current = await readFile(configPath, 'utf8');
+    if (digest(current) !== digest(original)) throw new Error('Codex config changed during installation');
+    // The recovery manifest must exist before the live Codex config changes.
+    await atomicReplace(manifestPath, JSON.stringify({ configPath, backupPath, originalHash: digest(original), installedHash: digest(plan.text), previous: plan.previous }, null, 2));
+    manifestPrepared = true;
+    await atomicReplace(configPath, plan.text);
+    return { configPath, backupPath, installed: true };
+  } catch (error) {
+    try {
+      if (digest(await readFile(configPath, 'utf8')) === digest(original)) {
+        if (manifestPrepared) await rm(manifestPath, { force: true });
+        await rm(join(dataDir, 'capability-token'), { force: true });
+      }
+    } catch { /* leave the manifest available for explicit recovery */ }
+    throw error;
+  }
 }
 
 export async function uninstall({ dataDir }) {
@@ -79,11 +97,10 @@ export async function uninstall({ dataDir }) {
   if (manifest.uninstalledAt) return { configPath: manifest.configPath, alreadyUninstalled: true };
   const current = await readFile(manifest.configPath, 'utf8');
   const original = await readFile(manifest.backupPath, 'utf8');
-  const restored = digest(current) === manifest.installedHash ? original : removeConfig(current, manifest.previous);
-  const temp = `${manifest.configPath}.jev-desktop-rescue.tmp`;
-  await writeFile(temp, restored, { mode: 0o600, flag: 'wx' });
-  await rename(temp, manifest.configPath);
-  await writeFile(manifestPath, JSON.stringify({ ...manifest, uninstalledAt: new Date().toISOString() }, null, 2));
+  const alreadyRestored = digest(current) === manifest.originalHash;
+  const restored = alreadyRestored ? current : digest(current) === manifest.installedHash ? original : removeConfig(current, manifest.previous);
+  if (!alreadyRestored) await atomicReplace(manifest.configPath, restored);
   await rm(join(dataDir, 'capability-token'), { force: true });
+  await atomicReplace(manifestPath, JSON.stringify({ ...manifest, uninstalledAt: new Date().toISOString() }, null, 2));
   return { configPath: manifest.configPath, exactRestore: restored === original };
 }

@@ -11,14 +11,19 @@ export class StateStore {
   async init() {
     await mkdir(this.directory, { recursive: true });
     try { this.control = { ...this.control, ...JSON.parse(await readFile(join(this.directory, 'control'), 'utf8')) }; } catch { /* fresh state */ }
-    try {
-      const lines = (await readFile(join(this.directory, 'sessions.jsonl'), 'utf8')).split(/\r?\n/).filter(Boolean);
-      for (const line of lines) { const entry = JSON.parse(line); this.sessions.set(entry.key, { ...this.session(entry.key), ...entry.value }); }
-    } catch { /* fresh state */ }
-    try {
-      const lines = (await readFile(join(this.directory, 'memory.jsonl'), 'utf8')).split(/\r?\n/).filter(Boolean);
-      for (const line of lines) { const entry = JSON.parse(line); if (entry.id) this.seen.add(entry.id); }
-    } catch { /* fresh state */ }
+    const journal = async name => {
+      const path = join(this.directory, name);
+      let source;
+      try { source = await readFile(path, 'utf8'); }
+      catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+      if (source && !source.endsWith('\n')) await appendFile(path, '\n');
+      return source.split(/\r?\n/).filter(Boolean).flatMap(line => {
+        try { return [JSON.parse(line)]; } catch { return []; }
+      });
+    };
+    for (const entry of await journal('sessions.jsonl')) if (entry && typeof entry === 'object' && entry.key && entry.value && typeof entry.value === 'object')
+      this.sessions.set(entry.key, { ...this.session(entry.key), ...entry.value });
+    for (const entry of await journal('memory.jsonl')) if (entry && typeof entry === 'object' && entry.id) this.seen.add(entry.id);
   }
   session(key) { return this.sessions.get(key) ?? {}; }
   async updateSession(key, value) {

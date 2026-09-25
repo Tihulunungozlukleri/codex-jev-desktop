@@ -239,7 +239,7 @@ export async function startServer(config, { fetchImpl = fetch, jev = askJev, sto
     }
     if (!['GET', 'POST'].includes(req.method) || !/^\/(?:v1\/)?(?:models|responses(?:\/compact)?)$/.test(path)) return json(res, 404, { error: 'not_found' });
     const isModels = path.endsWith('/models');
-    const base = isModels || req.headers['chatgpt-account-id'] ? config.upstreamChatgpt : config.upstreamApi;
+    const base = req.headers['chatgpt-account-id'] ? config.upstreamChatgpt : config.upstreamApi;
     if (isModels) {
       const context = catalogRequestContext(req.headers, req.url);
       const upstream = await fetchImpl(targetURL(base, context.path), { method: 'GET', headers: requestHeaders(req.headers), redirect: 'error' });
@@ -330,6 +330,10 @@ export async function startServer(config, { fetchImpl = fetch, jev = askJev, sto
             }
             if (previousClass && nextClass && ranks[nextClass] < ranks[previousClass]) decision.route = current;
             if (currentMode() !== 'active') decision.route = current;
+            if (currentMode() === 'active' && store.control.override && !previous.manualModel) {
+              const override = validCurrentRoute(store.control.override, catalog);
+              if (override) { decision.route = override; decision.source = 'manual_override'; }
+            }
             decision.source = `${decision.source}_reassess`;
             await store.updateSession(key, { route: decision.route, lastFailureHash: failureHash, lastRescueAttempt: progress.attempt,
               rescueActive: store.control.astraRescueOnly && fullCatalog.find(model => model.id === decision.route?.model)?.class === 'strongest' });

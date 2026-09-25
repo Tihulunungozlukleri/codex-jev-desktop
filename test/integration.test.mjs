@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { install, uninstall, prepareConfig } from '../src/integration.mjs';
 import { secureWrite } from '../src/secrets.mjs';
+import { StateStore } from '../src/state.mjs';
 
 test('managed config restores exact original and supports idempotent uninstall', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'jev-install-test-'));
@@ -39,6 +40,45 @@ test('rollback preserves unrelated user edits', async t => {
   assert.match(restored, /foo = false\nbar = true/);
   assert.match(restored, /model_provider = "openai"/);
   assert.doesNotMatch(restored, /jev_desktop/);
+});
+
+test('installation leaves native config intact if manifest cannot be prepared', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'jev-install-blocked-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dataDir = join(dir, 'state'), configPath = join(dir, 'config.toml');
+  const original = 'model = "gpt-6-sol"\n';
+  await writeFile(configPath, original);
+  await mkdir(join(dataDir, 'install.json'), { recursive: true });
+  await assert.rejects(install({ configPath, dataDir, port: 4319, hookPath: 'C:\\hook.mjs', preview: false }));
+  assert.equal(await readFile(configPath, 'utf8'), original);
+});
+
+test('rollback can finish when config was restored before manifest update', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'jev-uninstall-retry-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dataDir = join(dir, 'state'), configPath = join(dir, 'config.toml');
+  const original = 'model = "gpt-6-sol"\n';
+  await writeFile(configPath, original);
+  await install({ configPath, dataDir, port: 4319, hookPath: 'C:\\hook.mjs', preview: false });
+  await writeFile(configPath, original);
+  assert.equal((await uninstall({ dataDir })).exactRestore, true);
+  assert.equal((await uninstall({ dataDir })).alreadyUninstalled, true);
+});
+
+test('journal recovery separates a torn tail and loads later valid entries', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'jev-journal-recovery-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, 'sessions.jsonl'), '{"key":"first","value":{"route":{"model":"one"}}}\n{"key":');
+  await writeFile(join(dir, 'memory.jsonl'), '{"id":"first"}\n{"id":');
+  const store = new StateStore(dir);
+  await store.init();
+  await store.updateSession('second', { route: { model: 'two' } });
+  await store.archive('second', 'user', 'later memory');
+  const restarted = new StateStore(dir);
+  await restarted.init();
+  assert.equal(restarted.session('first').route.model, 'one');
+  assert.equal(restarted.session('second').route.model, 'two');
+  assert.equal(restarted.seen.size, 2);
 });
 
 test('secret writer stores a dedicated user-scoped file', async t => {

@@ -15,6 +15,8 @@ $fixtureDirectory = Join-Path $runtime ('smoke-' + [Guid]::NewGuid().ToString('N
 New-Item -ItemType Directory -Path $fixtureDirectory | Out-Null
 $fixtureScript = Join-Path $fixtureDirectory 'fixture.mjs'
 @'
+import { writeFileSync } from 'node:fs';
+writeFileSync(new URL('./data-dir.txt', import.meta.url), process.env.JEV_DESKTOP_DATA_DIR ?? '');
 console.log('fixture_started');
 setInterval(() => {}, 1000);
 '@ | Set-Content -LiteralPath $fixtureScript -Encoding UTF8
@@ -34,6 +36,10 @@ function Wait-FixtureChild([int]$Previous = 0) {
 try {
   $firstChild = Wait-FixtureChild
   $lastChild = $firstChild
+  $dataDirEvidence = Join-Path $fixtureDirectory 'data-dir.txt'
+  $deadline = (Get-Date).AddSeconds(5)
+  while (-not (Test-Path -LiteralPath $dataDirEvidence) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
+  if (-not (Test-Path -LiteralPath $dataDirEvidence) -or (Get-Content -LiteralPath $dataDirEvidence -Raw) -ne $fixtureDirectory) { throw 'Supervisor did not forward the data directory to Node' }
   Start-Sleep -Milliseconds 500
   Stop-Process -Id $firstChild.ProcessId -Force
   $replacement = Wait-FixtureChild $firstChild.ProcessId
@@ -43,7 +49,7 @@ try {
   $deadline = (Get-Date).AddSeconds(5)
   while ((Get-Process -Id $replacement.ProcessId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
   if (Get-Process -Id $replacement.ProcessId -ErrorAction SilentlyContinue) { throw 'Stopping supervisor left an orphan Node process' }
-  [pscustomobject]@{ hiddenExecutable = $true; childRestarted = $true; childStoppedWithSupervisor = $true } | ConvertTo-Json -Compress
+  [pscustomobject]@{ hiddenExecutable = $true; childRestarted = $true; childStoppedWithSupervisor = $true; dataDirForwarded = $true } | ConvertTo-Json -Compress
 } finally {
   if (-not $supervisor.HasExited) { Stop-Process -Id $supervisor.Id -Force -ErrorAction SilentlyContinue }
   if ($lastChild) {

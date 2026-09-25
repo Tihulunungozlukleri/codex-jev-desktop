@@ -8,7 +8,8 @@ function textOf(content) {
 
 export function requestInfo(body, headers = {}) {
   const input = Array.isArray(body?.input) ? body.input : [];
-  const hasToolResult = input.some(x => ['function_call_output', 'custom_tool_call_output'].includes(x?.type));
+  const latestUserIndex = input.findLastIndex(x => x?.role === 'user');
+  const hasToolResult = input.some((x, index) => index > latestUserIndex && ['function_call_output', 'custom_tool_call_output'].includes(x?.type));
   const hasAdditionalTools = input.some(x => x?.type === 'additional_tools');
   const users = input.filter(x => x?.role === 'user').map(x => textOf(x.content)).filter(Boolean);
   const current = users.at(-1) ?? null;

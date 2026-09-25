@@ -5,6 +5,8 @@ export function parseManualPreference(prompt) {
   if (/\b(?:jev(?:'i)?\s+(?:bu\s+tur\s+)?atla|bypass\s+jev|skip\s+jev)\b/i.test(text)) return { bypass: true };
   const direct = /(?:\bbu\s+tur(?:da|u)?\s+)?(?:\bmodel\s+olarak\s+)?(gpt-[\w.-]+|astra|sol|luna|terra)(?:['’]?(?:y[ıi]|[ıi]))?\s+(?:(low|medium|high|xhigh)\s+)?(?:kullan|seç)\b/i.exec(text);
   if (direct) return { model: direct[1].toLowerCase(), effort: direct[2]?.toLowerCase() ?? null };
+  const withModel = /\b(gpt-[\w.-]+|astra|sol|luna|terra)['’]?y?l[ae]\s+.{0,100}?\b(?:dene|dener|deneyebilir|incele|inceler|yap|çöz)\b/i.exec(text);
+  if (withModel) return { model: withModel[1].toLowerCase(), effort: null };
   // A direct Turkish request for a model can contain words between "ile" and
   // the action; it is still a one-turn preference, not a persistent policy.
   const action = /\b(gpt-[\w.-]+|astra|sol|luna|terra)(?:['’]?y[ıi])?\s+ile\s+.{0,80}?\b(?:incele|inceler|yap|çöz)\b/i.exec(text);

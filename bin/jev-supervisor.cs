@@ -55,6 +55,7 @@ public static class JevSupervisor {
                 var start = new ProcessStartInfo(args[0], "\"" + args[1] + "\" serve");
                 start.WorkingDirectory = Path.GetDirectoryName(args[1]);
                 start.UseShellExecute = false;
+                start.EnvironmentVariables["JEV_DESKTOP_DATA_DIR"] = args[2];
                 start.CreateNoWindow = true;
                 start.RedirectStandardOutput = true;
                 start.RedirectStandardError = true;
