@@ -1,0 +1,12 @@
+{
+  "name": "codex-jev-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check bin/jev-desktop.mjs && node --check src/server.mjs"
+  },
+  "bin": { "jev-desktop": "bin/jev-desktop.mjs" }
+}

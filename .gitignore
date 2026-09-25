@@ -1,0 +1,27 @@
+node_modules/
+.data/
+.runtime/
+*.log
+*.local.json
+.env
+.env.*
+*.local.*
+*.jsonl
+*.toml
+*.bak
+*.backup
+*.tmp
+*.zip
+*.exe
+*.dll
+*.pem
+*.key
+typesafe-key
+admin-token
+capability-token
+control
+install.json
+.codex/
+CodexJevDesktop/
+# Historical project-specific research stays local; share the neutral architecture document.
+docs/ARASTIRMA-VE-MIMARI.md
