@@ -19,3 +19,5 @@ Davet edilen kişi dosyaları indirebilir veya kopyalayabilir. Sonradan erişimi
 Commit yazarının adı ve e-postası Git geçmişinde görünür. Kişisel bilgilerin görünmesini istemiyorsan depo düzeyinde genel bir yazar kimliği veya GitHub'ın gizli e-posta seçeneğini kullan. Kaynak kod temizliği GitHub hesabının görünen adını veya profilini gizlemez.
 
 Arkadaşlar kurulumda kendi Codex hesabını ve TypeSafe anahtarını kullanmalıdır. Çalışır kurulum dizinini veya AppData klasörünü topluca göndermeyin.
+
+Davet kabul edildikten sonra arkadaşına [Windows kurulum kılavuzunu](INSTALL-WINDOWS.md) gönder. Kılavuz, anahtarın güvenli giriş komutunu ve başka bilgisayardaki ilk kontrol adımlarını içerir.

@@ -13,6 +13,8 @@ Windows 11 üzerinde Codex'in mevcut hesabını ve Responses akışını kullana
 
 Windows 11, Node.js 22 veya üzeri, kurulu ve hesabına giriş yapılmış Codex Desktop ve bir TypeSafe API anahtarı gerekir. Bu depo anahtar veya hazır kullanıcı ayarı içermez. Her kullanıcı kendi hesabını ve anahtarını kullanır.
 
+Başka bir bilgisayar için API anahtarının yeri, PowerShell komutları, ilk doğrulama ve sorun giderme adımları: **[Windows kurulum kılavuzu](docs/INSTALL-WINDOWS.md)**.
+
 1. Depoyu kalıcı bir dizine klonla; aşağıdaki komutları o dizinde çalıştır.
 2. `npm ci`, `npm run check` ve `npm test` ile kurulumu doğrula.
 3. `node bin/jev-desktop.mjs secret set` komutuyla kendi terminalinde anahtarını gizli girişle kaydet.

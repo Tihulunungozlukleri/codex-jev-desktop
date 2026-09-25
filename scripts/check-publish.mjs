@@ -9,7 +9,7 @@ const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8'
 const files = git('ls-files', '--cached', '-z').split('\0').filter(Boolean);
 const permitted = file => file === '.gitignore' || file === 'README.md' || file === 'package.json' || file === 'package-lock.json' ||
   /^(?:src|bin|scripts|test)\/[a-z0-9.-]+\.(?:mjs|ps1|cs)$/.test(file) ||
-  /^docs\/(?:ARCHITECTURE|SHARING)\.md$/.test(file);
+  /^docs\/(?:ARCHITECTURE|SHARING|INSTALL-WINDOWS)\.md$/.test(file);
 const checks = [
   ['absolute Windows user path', /[A-Za-z]:[\\/]Users[\\/][^\\/\s"'<>]+/i],
   ['home user path', /\/(?:home|Users)\/[a-z0-9._-]+\//i],
