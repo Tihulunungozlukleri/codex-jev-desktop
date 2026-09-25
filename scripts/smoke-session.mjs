@@ -3,7 +3,8 @@ import { createInterface } from 'node:readline';
 import { resolveCodexExecutable } from '../src/codex-runtime.mjs';
 
 const marker = 'amber-47';
-const routes = [
+const autoEffortAstra = process.argv.includes('--astra-auto-effort');
+const routes = autoEffortAstra ? [{ model: 'gpt-6-astra', effort: null }] : [
   { model: 'gpt-6-luna', effort: 'low' },
   { model: 'gpt-6-sol', effort: 'high' },
   ...(process.argv.includes('--include-astra') ? [{ model: 'gpt-6-astra', effort: 'high' }] : []),
@@ -16,7 +17,8 @@ const timer = setTimeout(() => { child.kill(); process.stderr.write('session smo
 function finish(ok, message) {
   clearTimeout(timer);
   process.stdout.write(JSON.stringify({ ok, sameThread: Boolean(threadId), firstTurnCompleted: turnIndex >= 1,
-    secondTurnCompleted: turnIndex >= 2, thirdTurnCompleted: routes.length < 3 ? null : turnIndex >= 3, recalledMarker: lastAnswer.includes(marker), results, detail: message }, null, 2) + '\n');
+    secondTurnCompleted: routes.length < 2 ? null : turnIndex >= 2, thirdTurnCompleted: routes.length < 3 ? null : turnIndex >= 3,
+    recalledMarker: autoEffortAstra ? null : lastAnswer.includes(marker), results, detail: message }, null, 2) + '\n');
   if (!ok) process.exitCode = 1;
   child.kill();
 }
@@ -37,16 +39,17 @@ createInterface({ input: child.stdout }).on('line', line => {
   } else if (message.id === 1) {
     threadId = message.result?.thread?.id;
     if (!threadId || !message.result?.thread?.ephemeral) return finish(false, 'ephemeral thread unsupported');
-    startTurn(`Use ${routes[0].model} ${routes[0].effort}. Remember the marker ${marker}. Reply SAVED.`, 2);
+    startTurn(autoEffortAstra ? "Bu turda Astra'yı kullan. Kısaca ASTRA_CHECK yaz." : `Use ${routes[0].model} ${routes[0].effort}. Remember the marker ${marker}. Reply SAVED.`, 2);
   } else if (message.method === 'item/completed' && message.params?.item?.type === 'agentMessage') {
     lastAnswer += message.params.item.text ?? '';
   } else if (message.method === 'turn/completed') {
     if (message.params?.turn?.status !== 'completed') return finish(false, message.params?.turn?.error?.message ?? 'turn failed');
     const route = routes[turnIndex];
-    const footer = `JEV route: ${route.model} · ${route.effort}`;
-    const footerMatches = lastAnswer.trimEnd().endsWith(footer);
-    const memoryMatches = turnIndex === 0 ? lastAnswer.includes('SAVED') : lastAnswer.includes(marker);
-    results.push({ ...route, footerMatches, memoryMatches });
+    const chosenEffort = autoEffortAstra ? /JEV route: gpt-6-astra · (low|medium|high|xhigh)$/.exec(lastAnswer.trimEnd())?.[1] ?? null : route.effort;
+    const footer = `JEV route: ${route.model} · ${chosenEffort}`;
+    const footerMatches = Boolean(chosenEffort && lastAnswer.trimEnd().endsWith(footer));
+    const memoryMatches = autoEffortAstra ? lastAnswer.includes('ASTRA_CHECK') : turnIndex === 0 ? lastAnswer.includes('SAVED') : lastAnswer.includes(marker);
+    results.push({ ...route, effort: chosenEffort, footerMatches, memoryMatches });
     if (!footerMatches || !memoryMatches) return finish(false, lastAnswer.slice(0, 250));
     turnIndex++;
     if (turnIndex < routes.length) {

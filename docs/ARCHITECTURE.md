@@ -6,6 +6,7 @@
 - Node.js rölesi, hesabın ve istemci sürümünün canlı model kataloğunu ayrı önbelleklerde tutar.
 - TypeSafe JEV sınırlı görev bağlamından model sınıfı, effort, görev modu, risk ve alt ajan önerisi üretir.
 - Yerel politika bu kararı gerçekten kullanılabilen modellere eşler. Kalıcı model havuzu, manuel seçimler ve isteğe bağlı Astra kurtarma kuralı uygulanır.
+- Kullanıcı yalnızca bu tur için model istediğinde ana model sabitlenir; JEV effort, görev modu, risk ve alt ajan önerisini hesaplamaya devam eder. Açıkça belirtilen effort sabit kalır. Yeni kullanıcı turu otomatik yönlendirmeye döner.
 - OpenAI/Codex yanıt akışı kullanıcıya aktarılır. Codex'in kanonik konuşma girdisi korunur; model/effort değiştirilir ve istenirse final rota dipnotu talimatı eklenir.
 - Güvenilir `UserPromptSubmit` hook'u görev önerisini iletir ve röle kapalıysa Windows görevini başlatmayı dener. Alt ajan oluşturmayı Codex yönetir.
 

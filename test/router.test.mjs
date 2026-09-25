@@ -115,6 +115,83 @@ test('explicit Turkish and English route requests outrank JEV', () => {
     { model: 'gpt-6-sol', effort: 'high' });
   assert.equal(parseManualPreference("JEV'i bu tur atla").bypass, true);
   assert.equal(parseManualPreference('Astra nedir?'), null);
+  assert.equal(parseManualPreference('Bu turda Astra ile derinden incele')?.model, 'astra');
+});
+
+test('one-turn model request fixes Astra while JEV chooses effort from the task and continuations keep that route', async t => {
+  const asked = [];
+  const f = await fixture(t, 'active', request => {
+    asked.push(request);
+    return { answers: { ...answers,
+      model_class: { choice: 'fast', confidence: .99 },
+      effort: { choice: request.state.current_user_request.toLowerCase().includes('mimari') ? 'xhigh' : 'low', confidence: .99 },
+    } };
+  });
+  await f.store.setControl({ astraRescueOnly: true, override: { model: 'gpt-6-sol', effort: 'high' } });
+  const headers = { ...f.localHeaders, 'chatgpt-account-id': 'account', 'thread-id': 'one-turn-astra', 'content-type': 'application/json' };
+  const send = async body => {
+    const response = await fetch(`${f.base}/responses`, { method: 'POST', headers, body: JSON.stringify(body) });
+    assert.equal(response.status, 200); await response.text();
+    const upstream = f.calls.filter(item => item.url.endsWith('/responses')).at(-1);
+    return JSON.parse(upstream.options.body.toString());
+  };
+  const special = { ...turn, input: [{ type: 'additional_tools' }, { role: 'user', content: 'Bu turda astrayı kullan. Mimariyi derinlemesine incele.' }] };
+  let forwarded = await send(special);
+  assert.equal(forwarded.model, 'gpt-6-astra');
+  assert.equal(forwarded.reasoning.effort, 'xhigh');
+  assert.match(forwarded.instructions, /JEV route: gpt-6-astra · xhigh/);
+  assert.equal(asked.length, 1);
+  assert.equal(f.store.lastDecision.source, 'jev_prompt_model');
+  forwarded = await send({ model: 'jev-auto', input: [{ type: 'function_call_output', call_id: 'failure', output: 'FAIL test: AssertionError' }] });
+  assert.equal(forwarded.model, 'gpt-6-astra');
+  assert.equal(forwarded.reasoning.effort, 'xhigh');
+  assert.equal(asked.length, 1);
+  await f.store.setControl({ override: null });
+  forwarded = await send({ ...turn, input: [{ type: 'additional_tools' }, { role: 'user', content: 'README içindeki yazım hatasını düzelt.' }] });
+  assert.equal(forwarded.model, 'gpt-6-luna');
+  assert.equal(forwarded.reasoning.effort, 'low');
+});
+
+test('explicit model plus effort remains fixed, and model-only request falls back to high if JEV is unavailable', async t => {
+  const f = await fixture(t, 'active', { malformed: true });
+  await f.store.setControl({ astraRescueOnly: true });
+  const headers = { ...f.localHeaders, 'chatgpt-account-id': 'account', 'thread-id': 'astra-fallback', 'content-type': 'application/json' };
+  const send = async text => {
+    const body = { ...turn, input: [{ type: 'additional_tools' }, { role: 'user', content: text }] };
+    const response = await fetch(`${f.base}/responses`, { method: 'POST', headers, body: JSON.stringify(body) });
+    assert.equal(response.status, 200); await response.text();
+    return JSON.parse(f.calls.filter(item => item.url.endsWith('/responses')).at(-1).options.body.toString());
+  };
+  let forwarded = await send('Bu turda astrayı kullan. Derin inceleme yap.');
+  assert.equal(forwarded.model, 'gpt-6-astra');
+  assert.equal(forwarded.reasoning.effort, 'high');
+  forwarded = await send('Use Astra low for this turn.');
+  assert.equal(forwarded.model, 'gpt-6-astra');
+  assert.equal(forwarded.reasoning.effort, 'low');
+});
+
+test('hook guidance and actual route agree on an explicit one-turn Astra request', async t => {
+  const f = await fixture(t, 'active', { answers: { ...answers,
+    model_class: { choice: 'fast', confidence: .99 }, effort: { choice: 'medium', confidence: .99 } } });
+  await f.store.setControl({ astraRescueOnly: true });
+  const headers = { ...f.localHeaders, 'chatgpt-account-id': 'account', 'thread-id': 'preflight-astra', 'content-type': 'application/json' };
+  // Fill the session catalog before the hook runs, as in an established task.
+  const warm = await fetch(`${f.base}/responses`, { method: 'POST', headers, body: JSON.stringify(turn) });
+  await warm.text();
+  const prompt = 'Bu turda Astra ile derinden incele.';
+  const preflight = await fetch(`${f.base}/preflight`, { method: 'POST', headers,
+    body: JSON.stringify({ session_id: 'preflight-astra', prompt }) });
+  assert.equal(preflight.status, 200);
+  const advice = await preflight.json();
+  assert.equal(advice.decision.route.model, 'gpt-6-astra');
+  assert.equal(advice.decision.route.effort, 'medium');
+  assert.match(advice.guidance, /Explicit one-turn Astra request/);
+  const routed = await fetch(`${f.base}/responses`, { method: 'POST', headers,
+    body: JSON.stringify({ ...turn, input: [{ type: 'additional_tools' }, { role: 'user', content: prompt }] }) });
+  assert.equal(routed.status, 200); await routed.text();
+  const upstream = JSON.parse(f.calls.filter(item => item.url.endsWith('/responses')).at(-1).options.body.toString());
+  assert.equal(upstream.model, 'gpt-6-astra');
+  assert.equal(upstream.reasoning.effort, 'medium');
 });
 
 async function fixture(t, mode = 'active', jevResult = { answers }, catalogForUrl = () => models) {

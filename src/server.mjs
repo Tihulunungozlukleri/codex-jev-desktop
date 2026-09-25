@@ -80,7 +80,7 @@ export async function startServer(config, { fetchImpl = fetch, jev = askJev, sto
     catalogs.set(context.key, { catalog, version: context.version, at: Date.now() });
     return catalog;
   }
-  async function decide(info, key, promptHash, current, catalog, rescueEligible = false) {
+  async function decide(info, key, promptHash, current, catalog, rescueEligible = false, forcedModel = null) {
     const previous = store.session(key);
     const state = dossier(info, previous);
     if (store.control.astraRescueOnly) state.model_policy = { astra: 'Only after at least two failed standard/high attempts in this user turn; complexity or risk alone is insufficient.', rescue_eligible: rescueEligible };
@@ -89,10 +89,16 @@ export async function startServer(config, { fetchImpl = fetch, jev = askJev, sto
     let result;
     if (cached && Date.now() - cached.at < 30000) { result = cached.result; preflight.delete(cacheKey); }
     else result = await jev(state, { url: config.jevUrl, key: config.jevKey, timeoutMs: config.timeoutMs, fetchImpl });
-    if (store.control.astraRescueOnly && !(rescueEligible && explicitRescueDecision(result.answers))) catalog = ordinaryModels(catalog);
+    if (store.control.astraRescueOnly && !forcedModel && !(rescueEligible && explicitRescueDecision(result.answers))) catalog = ordinaryModels(catalog);
     current = validCurrentRoute(current, catalog);
     let decision = result.answers ? normalizeDecision(result.answers, catalog, current) : fallbackDecision(catalog, current, result.error ?? 'jev_error');
-    if (decision.source === 'jev') decision = applyCacheTieBreak(decision, current, catalog, previous.cache);
+    if (forcedModel) {
+      const model = catalog.find(item => item.id === forcedModel);
+      if (model) {
+        decision.route = chooseProfile([model], model.class, result.answers ? decision.effort : 'high');
+        decision.source = `${decision.source}_prompt_model`;
+      }
+    } else if (decision.source === 'jev') decision = applyCacheTieBreak(decision, current, catalog, previous.cache);
     if (!decision.route) decision.route = chooseProfile(catalog, 'standard', 'high');
     return { decision, latencyMs: result.latencyMs ?? null };
   }
@@ -193,8 +199,10 @@ export async function startServer(config, { fetchImpl = fetch, jev = askJev, sto
       if (!prompt) return json(res, 400, { error: 'empty_prompt' });
       const key = data.session_id ? sha(data.session_id) : null;
       catalog = filterModels(sessionCatalogs.get(key) ?? [], store.control.modelPolicy);
+      const promptPreference = parseManualPreference(prompt);
+      const promptModel = promptPreference?.model ? resolveManualPreference(promptPreference, catalog, null)?.route?.model : null;
       if (store.control.astraRescueOnly) {
-        catalog = ordinaryModels(catalog);
+        if (!promptModel || catalog.find(model => model.id === promptModel)?.class !== 'strongest') catalog = ordinaryModels(catalog);
         await store.updateSession(key, { rescueAttempts: [], rescueActive: false, lastRescueAttempt: null });
       }
       const info = { current: prompt, prior: store.session(key).activeTask ?? null };
@@ -203,13 +211,19 @@ export async function startServer(config, { fetchImpl = fetch, jev = askJev, sto
       const result = currentMode() === 'bypass' ? { error: 'bypass' } : await jev(state, { url: config.jevUrl, key: config.jevKey, timeoutMs: config.timeoutMs, fetchImpl });
       const current = validCurrentRoute(store.session(key).route, catalog);
       const decision = result.answers ? normalizeDecision(result.answers, catalog, current) : fallbackDecision(catalog, current, result.error ?? 'jev_error');
+      if (promptModel && !promptPreference.effort) {
+        const model = catalog.find(item => item.id === promptModel);
+        if (model) decision.route = chooseProfile([model], model.class, result.answers ? decision.effort : 'high');
+      } else if (promptModel && promptPreference.effort) decision.route = resolveManualPreference(promptPreference, catalog, current)?.route ?? decision.route;
       const now = Date.now();
       for (const [entryKey, entry] of preflight) if (now - entry.at >= 30000) preflight.delete(entryKey);
       while (preflight.size >= 256) preflight.delete(preflight.keys().next().value);
       preflight.set(preflightKey(key, prompt), { at: now, result });
       const cliPath = fileURLToPath(new URL('../bin/jev-desktop.mjs', import.meta.url));
       const memoryHint = data.session_id ? `node "${cliPath}" memory --session "${data.session_id}" <keywords>` : '';
-      return json(res, 200, { decision, guidance: guidance(decision, state.active_task, memoryHint) + (store.control.astraRescueOnly ? '\nUser model preference: use Luna or Sol normally. Reserve Astra for demonstrated inability to solve the task after repeated Sol/high attempts. Apply this preference to any subagents too.' : '') });
+      return json(res, 200, { decision, guidance: guidance(decision, state.active_task, memoryHint) + ((promptModel && catalog.find(model => model.id === promptModel)?.class === 'strongest') || (promptPreference?.model?.includes('astra') && !sessionCatalogs.has(key))
+        ? '\nExplicit one-turn Astra request: use Astra for the main answer and let JEV choose its reasoning effort. Keep subagent models independent.'
+        : store.control.astraRescueOnly ? '\nUser model preference: use Luna or Sol normally. Reserve Astra for demonstrated inability to solve the task after repeated Sol/high attempts. Apply this preference to any subagents too.' : '') });
     }
     if (!['GET', 'POST'].includes(req.method) || !/^\/(?:v1\/)?(?:models|responses(?:\/compact)?)$/.test(path)) return json(res, 404, { error: 'not_found' });
     const isModels = path.endsWith('/models');
@@ -253,27 +267,33 @@ export async function startServer(config, { fetchImpl = fetch, jev = askJev, sto
       const previous = store.session(key);
       const newTurn = info.fresh || (info.current && !info.continuation && preflight.has(preflightKey(key, info.current)) && !info.auxiliary);
       const fullCatalog = catalog;
+      const promptPreference = newTurn ? parseManualPreference(info.current) : null;
+      const requestedModel = promptPreference?.model ? resolveManualPreference(promptPreference, fullCatalog, null)?.route?.model : null;
       const progress = rescueProgress(previous, body, fullCatalog);
       if (store.control.astraRescueOnly) {
         if (newTurn) await store.updateSession(key, { rescueAttempts: [], rescueActive: false, lastRescueAttempt: null });
         else if (info.continuation && !info.auxiliary && !path.endsWith('/compact')) await store.updateSession(key, { rescueAttempts: progress.attempts });
-        if (newTurn || !previous.rescueActive) catalog = ordinaryModels(catalog);
+        if (!(requestedModel && fullCatalog.find(model => model.id === requestedModel)?.class === 'strongest') && (newTurn || !previous.rescueActive)) catalog = ordinaryModels(catalog);
         if (!catalog.length) return json(res, 503, { error: 'no_ordinary_model', hint: 'Allow a Luna or Sol model for ordinary routing.' });
       }
       const current = validCurrentRoute(previous.route, catalog) ?? chooseProfile(catalog, 'standard', 'high');
       if (newTurn) {
         const mode = currentMode();
-        const manual = resolveManualPreference(parseManualPreference(info.current), catalog, current);
+        const manual = resolveManualPreference(promptPreference, catalog, current);
+        const modelOnly = Boolean(manual?.source === 'prompt_override' && requestedModel && !promptPreference.effort);
         const result = mode === 'bypass' ? { decision: fallbackDecision(catalog, current, 'bypass'), latencyMs: 0 }
+          : modelOnly ? await decide(info, key, info.current, current, catalog, false, requestedModel)
           : manual ? { decision: { ...fallbackDecision(catalog, manual.route, manual.source), source: manual.source }, latencyMs: 0 }
           : await decide(info, key, info.current, current, catalog);
         decision = !manual && mode === 'active' ? applyPhaseLease(result.decision, current, catalog, previous.lease, isShortFollowup(info.current)) : result.decision;
         let applied = decision.route ?? current;
-        if (store.control.override) {
+        if (store.control.override && !manual) {
           const selected = catalog.find(m => m.id === store.control.override.model && m.efforts.includes(store.control.override.effort));
           if (selected) { applied = store.control.override; decision.source = 'manual_override'; }
         } else if (mode !== 'active') applied = current;
-        if (applied && mode !== 'bypass') await store.updateSession(key, { route: applied, activeTask: redact(isShortFollowup(info.current) ? previous.activeTask ?? info.current : info.current), phase: decision.task_mode, lease: decision.lease, risk: decision.risk });
+        if (applied && mode !== 'bypass') await store.updateSession(key, { route: applied, activeTask: redact(isShortFollowup(info.current) ? previous.activeTask ?? info.current : info.current), phase: decision.task_mode, lease: decision.lease, risk: decision.risk,
+          rescueActive: Boolean(store.control.astraRescueOnly && manual && fullCatalog.find(model => model.id === applied.model)?.class === 'strongest'),
+          manualModel: manual?.source === 'prompt_override' && requestedModel ? requestedModel : null });
         if (mode === 'bypass') { applied = current; decision.source = 'bypass'; }
         await store.record({ ...decision, route: applied }, { session: key, latencyMs: result.latencyMs, shadow: mode === 'shadow', actualModel: applied?.model, actualEffort: applied?.effort });
         await store.archive(key, 'user', redact(info.current));
@@ -286,7 +306,7 @@ export async function startServer(config, { fetchImpl = fetch, jev = askJev, sto
           await store.updateSession(key, { evidence: safeEvidence });
           await store.archive(key, 'tool', safeEvidence);
           const failureChanged = store.control.astraRescueOnly ? progress.attempt && previous.lastRescueAttempt !== progress.attempt : unexpectedFailure(evidence) && previous.lastFailureHash !== failureHash;
-          if (info.continuation && failureChanged && !info.auxiliary && !path.endsWith('/compact') && currentMode() !== 'bypass') {
+          if (info.continuation && failureChanged && !previous.manualModel && !info.auxiliary && !path.endsWith('/compact') && currentMode() !== 'bypass') {
             const eligible = store.control.astraRescueOnly && progress.eligible;
             const result = await decide({ current: previous.activeTask ?? info.current ?? 'Continue the active task', prior: null }, key, failureHash, current, eligible ? fullCatalog : catalog, eligible);
             const previousClass = catalog.find(m => m.id === current?.model)?.class;
