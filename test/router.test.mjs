@@ -116,6 +116,9 @@ test('explicit Turkish and English route requests outrank JEV', () => {
   assert.equal(parseManualPreference("JEV'i bu tur atla").bypass, true);
   assert.equal(parseManualPreference('Astra nedir?'), null);
   assert.equal(parseManualPreference('Bu turda Astra ile derinden incele')?.model, 'astra');
+  assert.deepEqual(parseManualPreference('Bu turda Astra’yı kullan; projeyi derinden incele.'), { model: 'astra', effort: null });
+  assert.deepEqual(parseManualPreference('Bu turda Sol high kullan.'), { model: 'sol', effort: 'high' });
+  assert.equal(parseManualPreference('Astra’yı kullanma.'), null);
 });
 
 test('one-turn model request fixes Astra while JEV chooses effort from the task and continuations keep that route', async t => {
@@ -135,7 +138,7 @@ test('one-turn model request fixes Astra while JEV chooses effort from the task 
     const upstream = f.calls.filter(item => item.url.endsWith('/responses')).at(-1);
     return JSON.parse(upstream.options.body.toString());
   };
-  const special = { ...turn, input: [{ type: 'additional_tools' }, { role: 'user', content: 'Bu turda astrayı kullan. Mimariyi derinlemesine incele.' }] };
+  const special = { ...turn, input: [{ type: 'additional_tools' }, { role: 'user', content: 'Bu turda Astra’yı kullan şimdi mimariyi derinden incele.' }] };
   let forwarded = await send(special);
   assert.equal(forwarded.model, 'gpt-6-astra');
   assert.equal(forwarded.reasoning.effort, 'xhigh');
@@ -194,7 +197,7 @@ test('hook guidance and actual route agree on an explicit one-turn Astra request
   assert.equal(upstream.reasoning.effort, 'medium');
 });
 
-async function fixture(t, mode = 'active', jevResult = { answers }, catalogForUrl = () => models) {
+async function fixture(t, mode = 'active', jevResult = { answers }, catalogForUrl = () => models, responseForUrl = null) {
   const dataDir = await mkdtemp(join(tmpdir(), 'jev-desktop-test-'));
   const calls = [];
   const config = { host: '127.0.0.1', port: 0, timeoutMs: 200, upstreamChatgpt: 'https://chatgpt.com/backend-api/codex',
@@ -203,8 +206,11 @@ async function fixture(t, mode = 'active', jevResult = { answers }, catalogForUr
   const fakeFetch = async (url, options = {}) => {
     calls.push({ url: String(url), options });
     if (String(url).includes('typesafe.ai')) return new Response(JSON.stringify(typeof jevResult === 'function' ? jevResult(JSON.parse(options.body)) : jevResult), { status: 200, headers: { 'content-type': 'application/json' } });
-    if (new URL(url).pathname.endsWith('/models')) return new Response(JSON.stringify(catalogForUrl(new URL(url))), { status: 200, headers: { 'content-type': 'application/json' } });
-    return new Response('event: response.completed\ndata: {"ok":true}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    if (new URL(url).pathname.endsWith('/models')) {
+      const selected = catalogForUrl(new URL(url));
+      return selected instanceof Response ? selected : new Response(JSON.stringify(selected), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return responseForUrl?.(new URL(url), options) ?? new Response('event: response.completed\ndata: {"ok":true}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
   };
   const runtime = await startServer(config, { fetchImpl: fakeFetch });
   t.after(async () => { await new Promise(resolve => runtime.server.close(resolve)); await rm(dataDir, { recursive: true, force: true }); });
@@ -212,6 +218,52 @@ async function fixture(t, mode = 'active', jevResult = { answers }, catalogForUr
   const localHeaders = { 'x-jev-desktop-token': 'local-secret' };
   return { ...runtime, config, calls, base, localHeaders };
 }
+
+test('without an installed capability token only health and admin with its token are reachable', async t => {
+  const f = await fixture(t);
+  f.config.capabilityToken = null;
+  for (const [path, method] of [['/models', 'GET'], ['/responses', 'POST'], ['/preflight', 'POST']]) {
+    const response = await fetch(`${f.base}${path}`, { method, headers: { 'content-type': 'application/json' }, body: method === 'POST' ? '{}' : undefined });
+    assert.equal(response.status, 403, path);
+  }
+  assert.equal((await fetch(`${f.base}/health`)).status, 200);
+  assert.equal((await fetch(`${f.base}/admin/report`)).status, 403);
+  assert.equal((await fetch(`${f.base}/admin/report`, { headers: { 'x-jev-admin-token': f.config.adminToken } })).status, 200);
+  assert.equal(f.calls.length, 0);
+});
+
+test('catalog refresh uses bounded stale data for transient failures but not auth failures', async t => {
+  let now = 1000000, status = 200;
+  t.mock.method(Date, 'now', () => now);
+  const f = await fixture(t, 'active', { answers }, () => status === 200 ? models : new Response('', { status }));
+  const headers = { ...f.localHeaders, 'chatgpt-account-id': 'account', 'thread-id': 'catalog-fallback', 'content-type': 'application/json' };
+  const send = () => fetch(`${f.base}/responses`, { method: 'POST', headers, body: JSON.stringify(turn) });
+  assert.equal((await send()).status, 200);
+  now += 300001; status = 503;
+  assert.equal((await send()).status, 200);
+  now += 300001; status = 429;
+  assert.equal((await send()).status, 200);
+  status = 401;
+  assert.equal((await send()).status, 503);
+  now += 300000; status = 503;
+  assert.equal((await send()).status, 503);
+  assert.equal(f.calls.filter(item => new URL(item.url).pathname.endsWith('/models')).length, 5);
+});
+
+test('closing a streaming client cancels the upstream stream', async t => {
+  let canceled;
+  const canceledPromise = new Promise(resolve => { canceled = resolve; });
+  const f = await fixture(t, 'active', { answers }, () => models, () => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode('event: response.output_text.delta\ndata: {"delta":"hello"}\n\n')); },
+    cancel() { canceled(); },
+  }), { headers: { 'content-type': 'text/event-stream' } }));
+  const abort = new AbortController();
+  const response = await fetch(`${f.base}/responses`, { method: 'POST', signal: abort.signal,
+    headers: { ...f.localHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-6-sol', input: [] }) });
+  await response.body.getReader().read();
+  abort.abort();
+  await Promise.race([canceledPromise, new Promise((_, reject) => setTimeout(() => reject(new Error('upstream stream was not canceled')), 1000))]);
+});
 
 const turn = { model: 'jev-auto', reasoning: { effort: 'medium' }, input: [
   { type: 'additional_tools' }, { role: 'user', content: [{ type: 'input_text', text: 'Fix README typo' }] },

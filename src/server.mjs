@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
@@ -53,6 +54,8 @@ function permitted(req, token) {
   if (req.headers.origin || req.headers['sec-fetch-site']) return false;
   const host = String(req.headers.host ?? '').split(':')[0];
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(host)) return false;
+  const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+  if (!token && path !== '/health' && !path.startsWith('/admin/')) return false;
   if (token && req.headers['x-jev-desktop-token'] !== token) return false;
   return true;
 }
@@ -74,11 +77,20 @@ export async function startServer(config, { fetchImpl = fetch, jev = askJev, sto
     const existing = catalogs.get(context.key);
     if (existing && Date.now() - existing.at < 300000) return existing.catalog;
     const base = headers['chatgpt-account-id'] ? config.upstreamChatgpt : config.upstreamApi;
-    const response = await fetchImpl(targetURL(base, context.path), { method: 'GET', headers: requestHeaders(headers), redirect: 'error', signal: AbortSignal.timeout(10000) });
-    if (!response.ok) throw new Error(`catalog_http_${response.status}`);
-    const catalog = normalizeCatalog(await response.json());
-    catalogs.set(context.key, { catalog, version: context.version, at: Date.now() });
-    return catalog;
+    const canUseStale = Boolean(existing && Date.now() - existing.at < 900000);
+    try {
+      const response = await fetchImpl(targetURL(base, context.path), { method: 'GET', headers: requestHeaders(headers), redirect: 'error', signal: AbortSignal.timeout(10000) });
+      if (!response.ok) {
+        if (canUseStale && (response.status === 429 || response.status >= 500)) return existing.catalog;
+        throw new Error(`catalog_http_${response.status}`);
+      }
+      const catalog = normalizeCatalog(await response.json());
+      catalogs.set(context.key, { catalog, version: context.version, at: Date.now() });
+      return catalog;
+    } catch (error) {
+      if (canUseStale && ['TypeError', 'AbortError', 'TimeoutError'].includes(error?.name)) return existing.catalog;
+      throw error;
+    }
   }
   async function decide(info, key, promptHash, current, catalog, rescueEligible = false, forcedModel = null) {
     const previous = store.session(key);
@@ -332,20 +344,18 @@ export async function startServer(config, { fetchImpl = fetch, jev = askJev, sto
       output = Buffer.from(JSON.stringify(body));
     }
     const controller = new AbortController();
-    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+    const abortOnClose = () => { if (!res.writableEnded) controller.abort(); };
+    res.on('close', abortOnClose);
     const upstream = await fetchImpl(targetURL(base, req.url), { method: req.method, headers: requestHeaders(req.headers), body: output, signal: controller.signal, redirect: 'error' });
     res.writeHead(upstream.status, responseHeaders(upstream.headers));
     if (!upstream.body) return res.end();
     const observer = new SseObserver();
-    await new Promise((resolve, reject) => {
-      const stream = Readable.fromWeb(upstream.body);
-      const tap = new Transform({ transform(chunk, encoding, callback) {
-        observer.push(chunk);
-        callback(null, chunk);
-      } });
-      stream.on('error', reject); tap.on('error', reject); res.on('error', reject); res.on('finish', resolve);
-      stream.pipe(tap).pipe(res);
-    });
+    const tap = new Transform({ transform(chunk, encoding, callback) {
+      observer.push(chunk);
+      callback(null, chunk);
+    } });
+    try { await pipeline(Readable.fromWeb(upstream.body), tap, res, { signal: controller.signal }); }
+    finally { res.off('close', abortOnClose); }
     observer.finish();
     const sessionKey = requestInfo(body, req.headers).key;
     if (observer.visible) await store.archive(sessionKey, 'assistant', redact(observer.visible));
